@@ -16,14 +16,21 @@ export function getExpectedSubmittedTotal(
 }
 
 export function areAllPlayersDoneForRound(state: GreedyPigState): boolean {
+  let foundEligiblePlayer = false;
+
   for (const player of state.players.values()) {
     if (player.isHost) continue;
+    if (player.isConnected === false) continue;
+    if (player.activeThisRound === false) continue;
+
+    foundEligiblePlayer = true;
 
     if (!player.hasSaved && !player.isBusted) {
       return false;
     }
   }
-  return true;
+
+  return foundEligiblePlayer;
 }
 
 export function countConnectedPlayers(state: GreedyPigState): number {

@@ -5,6 +5,9 @@ export class GreedyPigPlayer extends Schema {
   @type("string") name: string = "";
   @type("boolean") isHost: boolean = false;
   @type("boolean") isConnected: boolean = true;
+  @type("boolean") activeThisRound: boolean = true;
+  @type("boolean") justRejoined: boolean = false;
+  @type("boolean") waitingForNextRound: boolean = false;
 
   @type("number") rollsThisRound: number = 0;
 

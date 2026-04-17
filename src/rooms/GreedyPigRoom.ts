@@ -245,36 +245,123 @@ export class GreedyPigRoom extends Room {
       this.returnToLobby();
     });
   }
+
+  private normalizePlayerName(name?: string): string {
+    return (
+      (name || "Player").trim().replace(/\s+/g, " ").slice(0, 10) || "Player"
+    );
+  }
+
+  private shouldJoinCurrentRound(): boolean {
+    return (
+      this.state.phase === "lobby" ||
+      this.state.phase === "awaiting_roll" ||
+      this.state.phase === "round_summary"
+    );
+  }
+
+  private findDisconnectedStudentByName(name: string): GreedyPigPlayer | null {
+    for (const player of this.state.players.values()) {
+      if (!player) continue;
+      if (player.isHost) continue;
+      if (player.isConnected) continue;
+      if (player.name === name) return player;
+    }
+    return null;
+  }
+
+  private reattachDisconnectedPlayer(
+    oldPlayer: GreedyPigPlayer,
+    newSessionId: string,
+  ) {
+    const oldSessionId = oldPlayer.sessionId;
+
+    if (oldSessionId && this.state.players.has(oldSessionId)) {
+      this.state.players.delete(oldSessionId);
+    }
+
+    oldPlayer.sessionId = newSessionId;
+    oldPlayer.isConnected = true;
+
+    this.state.players.set(newSessionId, oldPlayer);
+  }
+
   onJoin(client: Client, options: JoinOptions) {
     const requestedRoomCode = (options.roomCode || "")
       .trim()
       .toUpperCase()
-      .slice(0, 4); // 👈 limit to 4 chars
+      .slice(0, 4);
 
-    if (!options.isHost) {
+    const cleanName = this.normalizePlayerName(options.name);
+    const isHost = !!options.isHost;
+
+    if (!isHost) {
       if (requestedRoomCode !== this.state.roomCode) {
         client.leave(4001, "Invalid room code");
         return;
       }
+    }
 
-      if (this.state.phase !== "lobby") {
-        client.leave(4002, "Game already started");
+    if (isHost) {
+      const player = new GreedyPigPlayer();
+      player.sessionId = client.sessionId;
+      player.name = cleanName;
+      player.isHost = true;
+      player.isConnected = true;
+      player.activeThisRound = true;
+
+      if (!this.state.hostSessionId) {
+        this.state.hostSessionId = client.sessionId;
+      }
+
+      this.state.players.set(client.sessionId, player);
+      return;
+    }
+
+    // Try to reconnect to a previously disconnected student with the same name
+    const existingDisconnectedPlayer =
+      this.findDisconnectedStudentByName(cleanName);
+
+    if (existingDisconnectedPlayer) {
+      this.reattachDisconnectedPlayer(
+        existingDisconnectedPlayer,
+        client.sessionId,
+      );
+
+      existingDisconnectedPlayer.justRejoined = true;
+
+      existingDisconnectedPlayer.waitingForNextRound =
+        existingDisconnectedPlayer.activeThisRound === false;
+      return;
+    }
+
+    if (!isHost) {
+      const existingConnectedPlayer =
+        this.findConnectedStudentByName(cleanName);
+
+      if (existingConnectedPlayer) {
+        client.leave(4003, "That name is already in use");
         return;
       }
     }
 
+    // Brand new student join
     const player = new GreedyPigPlayer();
     player.sessionId = client.sessionId;
-
-    player.name =
-      (options.name || "Player").trim().replace(/\s+/g, " ").slice(0, 10) ||
-      "Player";
-
-    player.isHost = !!options.isHost;
+    player.name = cleanName;
+    player.isHost = false;
     player.isConnected = true;
+    player.activeThisRound = this.shouldJoinCurrentRound();
+    player.justRejoined = false;
+    player.waitingForNextRound = !player.activeThisRound;
 
-    if (player.isHost && !this.state.hostSessionId) {
-      this.state.hostSessionId = client.sessionId;
+    // If joining mid-round, they must not interfere with current round logic
+    if (!player.activeThisRound) {
+      player.hasAnsweredThisRoll = true;
+      player.hasSaved = false;
+      player.isBusted = false;
+      player.roundSubtotal = 0;
+      player.rollsThisRound = 0;
     }
 
     this.state.players.set(client.sessionId, player);
@@ -289,11 +376,11 @@ export class GreedyPigRoom extends Room {
       return;
     }
 
-    this.state.players.delete(client.sessionId);
+    player.isConnected = false;
 
     let activeStudentCount = 0;
     for (const p of this.state.players.values()) {
-      if (!p.isHost) activeStudentCount++;
+      if (!p.isHost && p.isConnected) activeStudentCount++;
     }
 
     if (activeStudentCount === 0) {
@@ -373,7 +460,12 @@ export class GreedyPigRoom extends Room {
     this.state.rollCountThisRound += 1;
 
     for (const player of this.state.players.values()) {
-      if (player.isHost || player.isConnected === false) continue;
+      if (
+        player.isHost ||
+        player.isConnected === false ||
+        !player.activeThisRound
+      )
+        continue;
       if (!player.hasSaved && !player.isBusted) {
         player.rollsThisRound += 1;
       }
@@ -385,7 +477,12 @@ export class GreedyPigRoom extends Room {
 
     if (knockoutHit) {
       for (const player of this.state.players.values()) {
-        if (player.isHost || player.isConnected === false) continue;
+        if (
+          player.isHost ||
+          player.isConnected === false ||
+          !player.activeThisRound
+        )
+          continue;
         if (player.hasSaved || player.isBusted) continue;
 
         const isSafeRoll =
@@ -427,7 +524,12 @@ export class GreedyPigRoom extends Room {
     }
 
     for (const player of this.state.players.values()) {
-      if (player.isHost || player.isConnected === false) continue;
+      if (
+        player.isHost ||
+        player.isConnected === false ||
+        !player.activeThisRound
+      )
+        continue;
 
       if (!player.hasSaved && !player.isBusted) {
         player.hasAnsweredThisRoll = false;
@@ -446,7 +548,12 @@ export class GreedyPigRoom extends Room {
       let everyoneAnswered = true;
 
       for (const player of this.state.players.values()) {
-        if (player.isHost || player.isConnected === false) continue;
+        if (
+          player.isHost ||
+          player.isConnected === false ||
+          !player.activeThisRound
+        )
+          continue;
 
         if (
           !player.hasSaved &&
@@ -475,15 +582,32 @@ export class GreedyPigRoom extends Room {
     });
   }
 
+  private findConnectedStudentByName(name: string): GreedyPigPlayer | null {
+    for (const player of this.state.players.values()) {
+      if (!player) continue;
+      if (player.isHost) continue;
+      if (player.isConnected === false) continue;
+      if (player.name === name) return player;
+    }
+    return null;
+  }
+
   private resetRoundFlags() {
     for (const player of this.state.players.values()) {
+      if (!player.isHost && player.isConnected) {
+        player.activeThisRound = true;
+      }
+
       player.roundSubtotal = 0;
       player.rollsThisRound = 0;
       player.hasSaved = false;
       player.isBusted = false;
       player.hasAnsweredThisRoll = false;
+      player.justRejoined = false;
+      player.waitingForNextRound = false;
     }
   }
+
   private isGameOver(): boolean {
     if (this.state.settings.mode === "rounds") {
       return this.state.currentRound >= this.state.settings.roundsToPlay;
@@ -508,6 +632,7 @@ export class GreedyPigRoom extends Room {
       player.isBusted = false;
       player.hasAnsweredThisRoll = false;
       player.rollsThisRound = 0;
+      player.activeThisRound = true;
     }
 
     this.state.currentRound = 1;
