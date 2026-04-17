@@ -1,5 +1,5 @@
-import { GreedyPigPlayer } from "../schema/GreedyPigPlayer";
-import { GreedyPigState } from "../schema/GreedyPigState";
+import { GreedyPigPlayer } from "../schema/GreedyPigPlayer.js";
+import { GreedyPigState } from "../schema/GreedyPigState.js";
 
 export function isKnockoutRoll(state: GreedyPigState): boolean {
   return Array.from(state.settings.knockoutNumbers).includes(state.currentRoll);

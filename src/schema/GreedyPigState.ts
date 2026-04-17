@@ -1,5 +1,5 @@
 import { Schema, MapSchema, ArraySchema, type } from "@colyseus/schema";
-import { GreedyPigPlayer } from "./GreedyPigPlayer";
+import { GreedyPigPlayer } from "./GreedyPigPlayer.js";
 
 export class GreedyPigSettings extends Schema {
   @type("string") mode: string = "rounds"; // "rounds" | "points"

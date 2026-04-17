@@ -1,13 +1,13 @@
 import { Room, Client } from "@colyseus/core";
-import { GreedyPigPlayer } from "../schema/GreedyPigPlayer";
-import { GreedyPigState } from "../schema/GreedyPigState";
+import { GreedyPigPlayer } from "../schema/GreedyPigPlayer.js";
+import { GreedyPigState } from "../schema/GreedyPigState.js";
 
-import { generateRoomCode } from "../utils/roomCode";
+import { generateRoomCode } from "../utils/roomCode.js";
 import {
   areAllPlayersDoneForRound,
   getExpectedSubmittedTotal,
   isKnockoutRoll,
-} from "../utils/rules";
+} from "../utils/rules.js";
 
 type UpdateSettingsPayload = {
   mode?: "rounds" | "points";
