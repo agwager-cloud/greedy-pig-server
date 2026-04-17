@@ -4,14 +4,14 @@ import { Server } from "colyseus";
 import { WebSocketTransport } from "@colyseus/ws-transport";
 import { monitor } from "@colyseus/monitor";
 import cors from "cors";
-import { GreedyPigRoom } from "./rooms/GreedyPigRoom";
+import { GreedyPigRoom } from "./rooms/GreedyPigRoom.js";
 
 const port = Number(process.env.PORT || 2567);
 const app = express();
 
 app.use(
   cors({
-    origin: "http://localhost:5173",
+    origin: true,
     credentials: true,
   }),
 );
