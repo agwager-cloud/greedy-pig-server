@@ -33,14 +33,57 @@ type HostRollResultPayload = {
   diceSides: 6 | 8 | 10 | 12 | 20;
 };
 
+type KickPlayerPayload = {
+  sessionId?: string;
+  name?: string;
+};
+
+type AllowPlayerNamePayload = {
+  name?: string;
+};
+
 export class GreedyPigRoom extends Room {
   declare state: GreedyPigState;
   maxClients = 40;
+
+  private blockedNames = new Set<string>();
+  private kickedSessionIds = new Set<string>();
 
   onCreate() {
     this.setState(new GreedyPigState());
     this.state.roomCode = generateRoomCode(4);
     this.state.settings.knockoutNumbers.push(2);
+
+    this.onMessage("request_manage_players_data", (client) => {
+      if (client.sessionId !== this.state.hostSessionId) return;
+
+      const connected: { name: string; sessionId: string }[] = [];
+      const disconnected: { name: string; sessionId: string }[] = [];
+
+      for (const player of this.state.players.values()) {
+        if (!player || player.isHost) continue;
+
+        const item = {
+          name: player.name,
+          sessionId: player.sessionId,
+        };
+
+        if (player.isConnected === false) {
+          disconnected.push(item);
+        } else {
+          connected.push(item);
+        }
+      }
+
+      connected.sort((a, b) => a.name.localeCompare(b.name));
+      disconnected.sort((a, b) => a.name.localeCompare(b.name));
+
+      client.send("manage_players_data", {
+        connected,
+        disconnected,
+        banned: [...this.blockedNames].sort((a, b) => a.localeCompare(b)),
+      });
+    });
 
     this.onMessage(
       "update_settings",
@@ -244,12 +287,88 @@ export class GreedyPigRoom extends Room {
       if (client.sessionId !== this.state.hostSessionId) return;
       this.returnToLobby();
     });
+
+    this.onMessage("kick_player", (client, payload: KickPlayerPayload) => {
+      if (client.sessionId !== this.state.hostSessionId) return;
+      if (!payload?.sessionId) return;
+      if (payload.sessionId === this.state.hostSessionId) return;
+
+      this.kickStudentBySessionId(
+        payload.sessionId,
+        "That name is not allowed. Please change your name and rejoin.",
+      );
+    });
+
+    this.onMessage(
+      "allow_player_name",
+      (client, payload: AllowPlayerNamePayload) => {
+        if (client.sessionId !== this.state.hostSessionId) return;
+        if (!payload?.name) return;
+
+        this.allowPlayerName(payload.name);
+      },
+    );
   }
 
   private normalizePlayerName(name?: string): string {
     return (
       (name || "Player").trim().replace(/\s+/g, " ").slice(0, 10) || "Player"
     );
+  }
+
+  private isNameBlocked(name: string): boolean {
+    return this.blockedNames.has(this.normalizePlayerName(name));
+  }
+
+  public getBlockedNames(): string[] {
+    return [...this.blockedNames].sort((a, b) => a.localeCompare(b));
+  }
+
+  private findClientBySessionId(sessionId: string): Client | null {
+    for (const client of this.clients) {
+      if (client.sessionId === sessionId) return client;
+    }
+    return null;
+  }
+
+  private kickStudentBySessionId(sessionId: string, reason: string): void {
+    const player = this.state.players.get(sessionId);
+    if (!player) return;
+    if (player.isHost) return;
+
+    const normalizedName = this.normalizePlayerName(player.name);
+    this.blockedNames.add(normalizedName);
+
+    const targetClient = this.findClientBySessionId(sessionId);
+
+    if (targetClient) {
+      this.kickedSessionIds.add(sessionId);
+      targetClient.send("kicked_from_room", {
+        reason,
+      });
+      targetClient.leave(4004, reason);
+      return;
+    }
+
+    // Fallback if they are already disconnected but still in state.
+    if (this.state.players.has(sessionId)) {
+      this.state.players.delete(sessionId);
+    }
+
+    if (
+      this.state.phase === "awaiting_answers" ||
+      this.state.phase === "awaiting_roll"
+    ) {
+      this.checkForRoundEnd();
+    }
+  }
+
+  private allowPlayerName(name?: string): void {
+    const normalizedName = this.normalizePlayerName(name);
+
+    if (!normalizedName) return;
+
+    this.blockedNames.delete(normalizedName);
   }
 
   private shouldJoinCurrentRound(): boolean {
@@ -300,6 +419,14 @@ export class GreedyPigRoom extends Room {
         client.leave(4001, "Invalid room code");
         return;
       }
+    }
+
+    if (!isHost && this.isNameBlocked(cleanName)) {
+      client.leave(
+        4004,
+        "That name is not allowed. Please choose a different name.",
+      );
+      return;
     }
 
     if (isHost) {
@@ -376,7 +503,17 @@ export class GreedyPigRoom extends Room {
       return;
     }
 
-    player.isConnected = false;
+    const wasKicked = this.kickedSessionIds.has(client.sessionId);
+
+    if (wasKicked) {
+      this.kickedSessionIds.delete(client.sessionId);
+
+      if (this.state.players.has(client.sessionId)) {
+        this.state.players.delete(client.sessionId);
+      }
+    } else {
+      player.isConnected = false;
+    }
 
     let activeStudentCount = 0;
     for (const p of this.state.players.values()) {
