@@ -52,6 +52,11 @@ export class GreedyPigRoom extends Room {
   onCreate() {
     this.setState(new GreedyPigState());
     this.state.roomCode = generateRoomCode(4);
+
+    this.setMetadata({
+      roomCode: this.state.roomCode,
+    });
+
     this.state.settings.knockoutNumbers.push(2);
 
     this.onMessage("request_manage_players_data", (client) => {

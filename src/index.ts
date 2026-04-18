@@ -32,7 +32,7 @@ const gameServer = new Server({
   }),
 });
 
-gameServer.define("greedy_pig", GreedyPigRoom);
+gameServer.define("greedy_pig", GreedyPigRoom).filterBy(["roomCode"]);
 
 // IMPORTANT: let Colyseus start listening here
 gameServer.listen(port);
