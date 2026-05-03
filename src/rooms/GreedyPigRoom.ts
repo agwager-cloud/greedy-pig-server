@@ -462,8 +462,22 @@ export class GreedyPigRoom extends Room {
 
       existingDisconnectedPlayer.justRejoined = true;
 
+      if (this.state.phase === "awaiting_answers") {
+        existingDisconnectedPlayer.activeThisRound = false;
+        existingDisconnectedPlayer.waitingForNextRound = true;
+        existingDisconnectedPlayer.hasAnsweredThisRoll = true;
+        existingDisconnectedPlayer.hasSaved = false;
+        existingDisconnectedPlayer.isBusted = false;
+        existingDisconnectedPlayer.roundSubtotal = 0;
+        existingDisconnectedPlayer.rollsThisRound = 0;
+
+        this.checkForRoundEnd();
+        return;
+      }
+
       existingDisconnectedPlayer.waitingForNextRound =
         existingDisconnectedPlayer.activeThisRound === false;
+
       return;
     }
 
