@@ -24,6 +24,7 @@ type JoinOptions = {
   name?: string;
   isHost?: boolean;
   roomCode?: string;
+  deviceId?: string;
 };
 
 type HostRollResultPayload = {
@@ -418,6 +419,7 @@ export class GreedyPigRoom extends Room {
 
     const cleanName = this.normalizePlayerName(options.name);
     const isHost = !!options.isHost;
+    const deviceId = this.normalizeDeviceId(options.deviceId);
 
     if (!isHost) {
       if (requestedRoomCode !== this.state.roomCode) {
@@ -481,6 +483,17 @@ export class GreedyPigRoom extends Room {
       return;
     }
 
+    // ADD DEVICE CHECK HERE
+    if (!isHost && deviceId) {
+      const existingDevicePlayer =
+        this.findConnectedStudentByDeviceId(deviceId);
+
+      if (existingDevicePlayer) {
+        client.leave(4005, "Only one player can join from this device.");
+        return;
+      }
+    }
+
     if (!isHost) {
       const existingConnectedPlayer =
         this.findConnectedStudentByName(cleanName);
@@ -495,6 +508,7 @@ export class GreedyPigRoom extends Room {
     const player = new GreedyPigPlayer();
     player.sessionId = client.sessionId;
     player.name = cleanName;
+    (player as any).deviceId = deviceId;
     player.isHost = false;
     player.isConnected = true;
     player.activeThisRound = this.shouldJoinCurrentRound();
@@ -550,6 +564,25 @@ export class GreedyPigRoom extends Room {
     ) {
       this.checkForRoundEnd();
     }
+  }
+
+  private normalizeDeviceId(deviceId?: string): string {
+    return (deviceId || "").trim().slice(0, 80);
+  }
+
+  private findConnectedStudentByDeviceId(
+    deviceId: string,
+  ): GreedyPigPlayer | null {
+    if (!deviceId) return null;
+
+    for (const player of this.state.players.values()) {
+      if (!player) continue;
+      if (player.isHost) continue;
+      if (player.isConnected === false) continue;
+      if ((player as any).deviceId === deviceId) return player;
+    }
+
+    return null;
   }
 
   private returnToLobby() {
