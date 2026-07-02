@@ -548,16 +548,6 @@ export class GreedyPigRoom extends Room {
       player.isConnected = false;
     }
 
-    let activeStudentCount = 0;
-    for (const p of this.state.players.values()) {
-      if (!p.isHost && p.isConnected) activeStudentCount++;
-    }
-
-    if (activeStudentCount === 0) {
-      this.returnToLobby();
-      return;
-    }
-
     if (
       this.state.phase === "awaiting_answers" ||
       this.state.phase === "awaiting_roll"
@@ -649,12 +639,7 @@ export class GreedyPigRoom extends Room {
     this.state.rollCountThisRound += 1;
 
     for (const player of this.state.players.values()) {
-      if (
-        player.isHost ||
-        player.isConnected === false ||
-        !player.activeThisRound
-      )
-        continue;
+      if (player.isConnected === false || !player.activeThisRound) continue;
       if (!player.hasSaved && !player.isBusted) {
         player.rollsThisRound += 1;
       }
@@ -666,12 +651,7 @@ export class GreedyPigRoom extends Room {
 
     if (knockoutHit) {
       for (const player of this.state.players.values()) {
-        if (
-          player.isHost ||
-          player.isConnected === false ||
-          !player.activeThisRound
-        )
-          continue;
+        if (player.isConnected === false || !player.activeThisRound) continue;
         if (player.hasSaved || player.isBusted) continue;
 
         const isSafeRoll =
@@ -713,12 +693,7 @@ export class GreedyPigRoom extends Room {
     }
 
     for (const player of this.state.players.values()) {
-      if (
-        player.isHost ||
-        player.isConnected === false ||
-        !player.activeThisRound
-      )
-        continue;
+      if (player.isConnected === false || !player.activeThisRound) continue;
 
       if (!player.hasSaved && !player.isBusted) {
         player.hasAnsweredThisRoll = false;
@@ -737,12 +712,7 @@ export class GreedyPigRoom extends Room {
       let everyoneAnswered = true;
 
       for (const player of this.state.players.values()) {
-        if (
-          player.isHost ||
-          player.isConnected === false ||
-          !player.activeThisRound
-        )
-          continue;
+        if (player.isConnected === false || !player.activeThisRound) continue;
 
         if (
           !player.hasSaved &&
@@ -783,7 +753,7 @@ export class GreedyPigRoom extends Room {
 
   private resetRoundFlags() {
     for (const player of this.state.players.values()) {
-      if (!player.isHost && player.isConnected) {
+      if (player.isConnected) {
         player.activeThisRound = true;
       }
 
