@@ -26,6 +26,10 @@ export class GreedyPigState extends Schema {
   @type("number") rollCountdownEndsAt: number = 0;
   @type("number") rollCountdownDurationMs: number = 0;
 
+  @type("string") participationWinnerSessionId: string = "";
+  @type("string") participationWinnerName: string = "";
+  @type(["string"]) participationEligibleSessionIds = new ArraySchema<string>();
+
   @type({ map: GreedyPigPlayer })
   players = new MapSchema<GreedyPigPlayer>();
 }

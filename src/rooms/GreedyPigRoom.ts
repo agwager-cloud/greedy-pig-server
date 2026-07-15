@@ -50,6 +50,7 @@ export class GreedyPigRoom extends Room {
   private blockedNames = new Set<string>();
   private kickedSessionIds = new Set<string>();
   private countdownTimer: ReturnType<typeof setTimeout> | null = null;
+  private firstRollTimer: ReturnType<typeof setTimeout> | null = null;
   private rollFallbackTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly decisionWindowMs = 15_000;
 
@@ -66,15 +67,16 @@ export class GreedyPigRoom extends Room {
     this.onMessage("request_manage_players_data", (client) => {
       if (client.sessionId !== this.state.hostSessionId) return;
 
-      const connected: { name: string; sessionId: string }[] = [];
-      const disconnected: { name: string; sessionId: string }[] = [];
+      const connected: { name: string; sessionId: string; isHost: boolean }[] = [];
+      const disconnected: { name: string; sessionId: string; isHost: boolean }[] = [];
 
       for (const player of this.state.players.values()) {
-        if (!player || player.isHost) continue;
+        if (!player) continue;
 
         const item = {
           name: player.name,
           sessionId: player.sessionId,
+          isHost: player.isHost,
         };
 
         if (player.isConnected === false) {
@@ -271,8 +273,7 @@ export class GreedyPigRoom extends Room {
       if (this.state.phase !== "round_summary") return;
 
       if (this.isGameOver()) {
-        this.state.phase = "game_over";
-        this.broadcast("game_over", {});
+        this.finishGame();
         return;
       }
 
@@ -281,13 +282,12 @@ export class GreedyPigRoom extends Room {
       this.state.rollCountThisRound = 0;
       this.resetRoundFlags();
 
-      // Move out of round_summary before starting the automatic countdown.
-      // Previously startRollCountdown() returned early while the phase was still
-      // round_summary, which left the next round stuck on "Get ready".
+      // Move out of round_summary before launching the immediate first roll.
+      // Keeping this phase change preserves the Round 2 freeze fix.
       this.state.phase = "awaiting_roll";
 
       this.broadcast("round_started", { round: this.state.currentRound });
-      this.startRollCountdown();
+      this.startImmediateFirstRoll();
     });
 
     this.onMessage("play_again", (client) => {
@@ -631,6 +631,13 @@ export class GreedyPigRoom extends Room {
     }
   }
 
+  private clearFirstRollTimer() {
+    if (this.firstRollTimer) {
+      clearTimeout(this.firstRollTimer);
+      this.firstRollTimer = null;
+    }
+  }
+
   private clearRollFallbackTimer() {
     if (this.rollFallbackTimer) {
       clearTimeout(this.rollFallbackTimer);
@@ -657,6 +664,7 @@ export class GreedyPigRoom extends Room {
 
   private startRollCountdown() {
     this.clearCountdownTimer();
+    this.clearFirstRollTimer();
     this.clearRollFallbackTimer();
 
     if (this.state.phase === "game_over") {
@@ -684,6 +692,32 @@ export class GreedyPigRoom extends Room {
       this.countdownTimer = null;
       this.triggerAutomaticRoll();
     }, this.decisionWindowMs);
+  }
+
+  private startImmediateFirstRoll() {
+    this.clearCountdownTimer();
+    this.clearFirstRollTimer();
+    this.clearRollFallbackTimer();
+    this.clearCountdownState();
+
+    if (this.state.phase === "game_over") return;
+
+    if (!this.hasAnyPlayerStillPlayingRound()) {
+      this.checkForRoundEnd();
+      return;
+    }
+
+    this.state.phase = "awaiting_roll";
+    this.broadcast("first_roll_starting", {
+      round: this.state.currentRound,
+    });
+
+    // Brief scene-settle delay only: no countdown is shown. This prevents the
+    // first roll event racing ahead of clients while they leave the lobby.
+    this.firstRollTimer = setTimeout(() => {
+      this.firstRollTimer = null;
+      this.triggerAutomaticRoll();
+    }, 850);
   }
 
   private startAnswerCountdown() {
@@ -720,6 +754,7 @@ export class GreedyPigRoom extends Room {
     if (this.state.phase !== "awaiting_roll") return;
 
     this.clearCountdownTimer();
+    this.clearFirstRollTimer();
     this.clearCountdownState();
 
     if (!this.hasAnyPlayerStillPlayingRound()) {
@@ -732,6 +767,7 @@ export class GreedyPigRoom extends Room {
 
   private startRollAnimation() {
     this.clearCountdownTimer();
+    this.clearFirstRollTimer();
     this.clearCountdownState();
     this.clearRollFallbackTimer();
 
@@ -791,12 +827,13 @@ export class GreedyPigRoom extends Room {
   }
 
   private startGame() {
+    this.clearParticipationAward();
     this.state.currentRound = 1;
     this.state.currentRoll = 0;
     this.state.rollCountThisRound = 0;
     this.resetRoundFlags();
     this.broadcast("round_started", { round: this.state.currentRound });
-    this.startRollCountdown();
+    this.startImmediateFirstRoll();
   }
 
   private applyHostResolvedRoll(
@@ -885,12 +922,60 @@ export class GreedyPigRoom extends Room {
     this.startAnswerCountdown();
   }
 
+  private clearParticipationAward() {
+    this.state.participationWinnerSessionId = "";
+    this.state.participationWinnerName = "";
+    this.state.participationEligibleSessionIds.clear();
+  }
+
+  private prepareParticipationAward() {
+    this.clearParticipationAward();
+
+    const eligible: GreedyPigPlayer[] = [];
+    for (const player of this.state.players.values()) {
+      if (!player || player.isConnected === false) continue;
+      eligible.push(player);
+      this.state.participationEligibleSessionIds.push(player.sessionId);
+    }
+
+    if (eligible.length === 0) return;
+
+    const winner = eligible[Math.floor(Math.random() * eligible.length)];
+    this.state.participationWinnerSessionId = winner.sessionId;
+    this.state.participationWinnerName = winner.name;
+  }
+
+  private finishGame() {
+    this.clearCountdownTimer();
+    this.clearFirstRollTimer();
+    this.clearRollFallbackTimer();
+    this.clearCountdownState();
+    this.prepareParticipationAward();
+    this.state.phase = "game_over";
+
+    const eligibleNames: string[] = [];
+    for (const sessionId of this.state.participationEligibleSessionIds) {
+      const player = this.state.players.get(sessionId);
+      if (player) eligibleNames.push(player.name);
+    }
+
+    this.broadcast("game_over", {
+      participationWinnerSessionId: this.state.participationWinnerSessionId,
+      participationWinnerName: this.state.participationWinnerName,
+      participationEligibleSessionIds: [
+        ...this.state.participationEligibleSessionIds,
+      ],
+      participationEligibleNames: eligibleNames,
+    });
+  }
+
   private checkForRoundEnd() {
     if (!areAllPlayersDoneForRound(this.state)) {
       return;
     }
 
     this.clearCountdownTimer();
+    this.clearFirstRollTimer();
     this.clearRollFallbackTimer();
     this.clearCountdownState();
 
@@ -947,6 +1032,8 @@ export class GreedyPigRoom extends Room {
   }
 
   private resetForNewGame(returnToLobby: boolean) {
+    this.clearParticipationAward();
+
     for (const player of this.state.players.values()) {
       player.bankedScore = 0;
       player.roundSubtotal = 0;
@@ -958,6 +1045,7 @@ export class GreedyPigRoom extends Room {
     }
 
     this.clearCountdownTimer();
+    this.clearFirstRollTimer();
     this.clearRollFallbackTimer();
     this.clearCountdownState();
 
@@ -993,12 +1081,13 @@ export class GreedyPigRoom extends Room {
       this.broadcast("returned_to_lobby", {});
     } else {
       this.broadcast("round_started", { round: this.state.currentRound });
-      this.startRollCountdown();
+      this.startImmediateFirstRoll();
     }
   }
 
   onDispose() {
     this.clearCountdownTimer();
+    this.clearFirstRollTimer();
     this.clearRollFallbackTimer();
   }
 }
