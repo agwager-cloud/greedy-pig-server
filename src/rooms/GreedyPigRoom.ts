@@ -281,6 +281,11 @@ export class GreedyPigRoom extends Room {
       this.state.rollCountThisRound = 0;
       this.resetRoundFlags();
 
+      // Move out of round_summary before starting the automatic countdown.
+      // Previously startRollCountdown() returned early while the phase was still
+      // round_summary, which left the next round stuck on "Get ready".
+      this.state.phase = "awaiting_roll";
+
       this.broadcast("round_started", { round: this.state.currentRound });
       this.startRollCountdown();
     });
@@ -654,7 +659,7 @@ export class GreedyPigRoom extends Room {
     this.clearCountdownTimer();
     this.clearRollFallbackTimer();
 
-    if (this.state.phase === "game_over" || this.state.phase === "round_summary") {
+    if (this.state.phase === "game_over") {
       this.clearCountdownState();
       return;
     }
