@@ -23,6 +23,9 @@ export class GreedyPigState extends Schema {
   @type("number") currentRoll: number = 0;
   @type("number") rollCountThisRound: number = 0;
 
+  @type("number") rollCountdownEndsAt: number = 0;
+  @type("number") rollCountdownDurationMs: number = 0;
+
   @type({ map: GreedyPigPlayer })
   players = new MapSchema<GreedyPigPlayer>();
 }

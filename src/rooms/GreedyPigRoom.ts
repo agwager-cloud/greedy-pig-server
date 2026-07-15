@@ -49,6 +49,9 @@ export class GreedyPigRoom extends Room {
 
   private blockedNames = new Set<string>();
   private kickedSessionIds = new Set<string>();
+  private countdownTimer: ReturnType<typeof setTimeout> | null = null;
+  private rollFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly decisionWindowMs = 15_000;
 
   onCreate() {
     this.setState(new GreedyPigState());
@@ -159,15 +162,12 @@ export class GreedyPigRoom extends Room {
     });
 
     this.onMessage("roll_die", (client) => {
+      // Legacy/manual fallback only. The normal game flow now rolls automatically
+      // after the server-controlled countdown reaches zero.
       if (client.sessionId !== this.state.hostSessionId) return;
       if (this.state.phase !== "awaiting_roll") return;
 
-      this.state.phase = "rolling_animation";
-
-      this.broadcast("host_roll_requested", {
-        diceCount: Number(this.state.settings.diceCount ?? 1),
-        diceSides: Number(this.state.settings.diceSides ?? 6),
-      });
+      this.triggerAutomaticRoll();
     });
 
     this.onMessage(
@@ -197,6 +197,7 @@ export class GreedyPigRoom extends Room {
           }
         }
 
+        this.clearRollFallbackTimer();
         this.applyHostResolvedRoll(die1, die2, diceCount, diceSides);
       },
     );
@@ -279,9 +280,9 @@ export class GreedyPigRoom extends Room {
       this.state.currentRoll = 0;
       this.state.rollCountThisRound = 0;
       this.resetRoundFlags();
-      this.state.phase = "awaiting_roll";
 
       this.broadcast("round_started", { round: this.state.currentRound });
+      this.startRollCountdown();
     });
 
     this.onMessage("play_again", (client) => {
@@ -618,13 +619,179 @@ export class GreedyPigRoom extends Room {
     };
   }
 
+  private clearCountdownTimer() {
+    if (this.countdownTimer) {
+      clearTimeout(this.countdownTimer);
+      this.countdownTimer = null;
+    }
+  }
+
+  private clearRollFallbackTimer() {
+    if (this.rollFallbackTimer) {
+      clearTimeout(this.rollFallbackTimer);
+      this.rollFallbackTimer = null;
+    }
+  }
+
+  private clearCountdownState() {
+    this.state.rollCountdownEndsAt = 0;
+    this.state.rollCountdownDurationMs = 0;
+  }
+
+  private hasAnyPlayerStillPlayingRound(): boolean {
+    for (const player of this.state.players.values()) {
+      if (!player) continue;
+      if (player.isConnected === false) continue;
+      if (player.activeThisRound === false) continue;
+      if (player.hasSaved || player.isBusted) continue;
+      return true;
+    }
+
+    return false;
+  }
+
+  private startRollCountdown() {
+    this.clearCountdownTimer();
+    this.clearRollFallbackTimer();
+
+    if (this.state.phase === "game_over" || this.state.phase === "round_summary") {
+      this.clearCountdownState();
+      return;
+    }
+
+    if (!this.hasAnyPlayerStillPlayingRound()) {
+      this.clearCountdownState();
+      this.checkForRoundEnd();
+      return;
+    }
+
+    this.state.phase = "awaiting_roll";
+    this.state.rollCountdownDurationMs = this.decisionWindowMs;
+    this.state.rollCountdownEndsAt = Date.now() + this.decisionWindowMs;
+
+    this.broadcast("roll_countdown_started", {
+      round: this.state.currentRound,
+      durationMs: this.decisionWindowMs,
+      endsAt: this.state.rollCountdownEndsAt,
+    });
+
+    this.countdownTimer = setTimeout(() => {
+      this.countdownTimer = null;
+      this.triggerAutomaticRoll();
+    }, this.decisionWindowMs);
+  }
+
+  private startAnswerCountdown() {
+    this.clearCountdownTimer();
+
+    if (this.state.phase !== "awaiting_answers") {
+      this.clearCountdownState();
+      return;
+    }
+
+    if (!this.hasAnyPlayerStillPlayingRound()) {
+      this.clearCountdownState();
+      this.checkForRoundEnd();
+      return;
+    }
+
+    this.state.rollCountdownDurationMs = this.decisionWindowMs;
+    this.state.rollCountdownEndsAt = Date.now() + this.decisionWindowMs;
+
+    this.broadcast("answer_countdown_started", {
+      round: this.state.currentRound,
+      durationMs: this.decisionWindowMs,
+      endsAt: this.state.rollCountdownEndsAt,
+      currentRoll: this.state.currentRoll,
+    });
+
+    this.countdownTimer = setTimeout(() => {
+      this.countdownTimer = null;
+      this.handleAnswerCountdownExpired();
+    }, this.decisionWindowMs);
+  }
+
+  private triggerAutomaticRoll() {
+    if (this.state.phase !== "awaiting_roll") return;
+
+    this.clearCountdownTimer();
+    this.clearCountdownState();
+
+    if (!this.hasAnyPlayerStillPlayingRound()) {
+      this.checkForRoundEnd();
+      return;
+    }
+
+    this.startRollAnimation();
+  }
+
+  private startRollAnimation() {
+    this.clearCountdownTimer();
+    this.clearCountdownState();
+    this.clearRollFallbackTimer();
+
+    if (!this.hasAnyPlayerStillPlayingRound()) {
+      this.checkForRoundEnd();
+      return;
+    }
+
+    this.state.phase = "rolling_animation";
+
+    const diceCount = Number(this.state.settings.diceCount ?? 1);
+    const diceSides = Number(this.state.settings.diceSides ?? 6) as 6 | 8 | 10 | 12 | 20;
+
+    this.broadcast("host_roll_requested", {
+      diceCount,
+      diceSides,
+    });
+
+    this.rollFallbackTimer = setTimeout(() => {
+      if (this.state.phase !== "rolling_animation") return;
+
+      const die1 = Math.floor(Math.random() * diceSides) + 1;
+      const die2 = diceCount === 2 ? Math.floor(Math.random() * diceSides) + 1 : null;
+      this.applyHostResolvedRoll(die1, die2, diceCount, diceSides);
+    }, 12_000);
+  }
+
+  private handleAnswerCountdownExpired() {
+    if (this.state.phase !== "awaiting_answers") return;
+
+    this.clearCountdownTimer();
+    this.clearCountdownState();
+
+    for (const player of this.state.players.values()) {
+      if (!player) continue;
+      if (player.isConnected === false || !player.activeThisRound) continue;
+      if (player.hasSaved || player.isBusted) continue;
+      if (player.hasAnsweredThisRoll) continue;
+
+      player.hasSaved = true;
+      player.hasAnsweredThisRoll = true;
+      player.bankedScore += player.roundSubtotal;
+
+      const client = this.findClientBySessionId(player.sessionId);
+      client?.send("auto_saved", {
+        roundSubtotal: player.roundSubtotal,
+        bankedScore: player.bankedScore,
+      });
+    }
+
+    if (!this.hasAnyPlayerStillPlayingRound()) {
+      this.checkForRoundEnd();
+      return;
+    }
+
+    this.startRollAnimation();
+  }
+
   private startGame() {
     this.state.currentRound = 1;
     this.state.currentRoll = 0;
     this.state.rollCountThisRound = 0;
     this.resetRoundFlags();
-    this.state.phase = "awaiting_roll";
     this.broadcast("round_started", { round: this.state.currentRound });
+    this.startRollCountdown();
   }
 
   private applyHostResolvedRoll(
@@ -633,6 +800,10 @@ export class GreedyPigRoom extends Room {
     diceCount: number,
     diceSides: number,
   ) {
+    this.clearRollFallbackTimer();
+    this.clearCountdownTimer();
+    this.clearCountdownState();
+
     const total = diceCount === 2 ? die1 + (die2 ?? 0) : die1;
 
     this.state.currentRoll = total;
@@ -688,7 +859,7 @@ export class GreedyPigRoom extends Room {
         );
       }
 
-      this.checkForRoundEnd();
+      this.startAnswerCountdown();
       return;
     }
 
@@ -705,31 +876,18 @@ export class GreedyPigRoom extends Room {
       "roll_result",
       this.buildRollMessage(die1, die2, diceCount, diceSides, false),
     );
+
+    this.startAnswerCountdown();
   }
 
   private checkForRoundEnd() {
     if (!areAllPlayersDoneForRound(this.state)) {
-      let everyoneAnswered = true;
-
-      for (const player of this.state.players.values()) {
-        if (player.isConnected === false || !player.activeThisRound) continue;
-
-        if (
-          !player.hasSaved &&
-          !player.isBusted &&
-          !player.hasAnsweredThisRoll
-        ) {
-          everyoneAnswered = false;
-          break;
-        }
-      }
-
-      if (everyoneAnswered) {
-        this.state.phase = "awaiting_roll";
-      }
-
       return;
     }
+
+    this.clearCountdownTimer();
+    this.clearRollFallbackTimer();
+    this.clearCountdownState();
 
     this.state.phase = "round_summary";
 
@@ -794,6 +952,10 @@ export class GreedyPigRoom extends Room {
       player.activeThisRound = true;
     }
 
+    this.clearCountdownTimer();
+    this.clearRollFallbackTimer();
+    this.clearCountdownState();
+
     this.state.currentRound = 1;
     this.state.currentRoll = 0;
     this.state.rollCountThisRound = 0;
@@ -826,6 +988,12 @@ export class GreedyPigRoom extends Room {
       this.broadcast("returned_to_lobby", {});
     } else {
       this.broadcast("round_started", { round: this.state.currentRound });
+      this.startRollCountdown();
     }
+  }
+
+  onDispose() {
+    this.clearCountdownTimer();
+    this.clearRollFallbackTimer();
   }
 }
