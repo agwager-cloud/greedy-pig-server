@@ -712,8 +712,8 @@ export class GreedyPigRoom extends Room {
       round: this.state.currentRound,
     });
 
-    // Brief scene-settle delay only: no countdown is shown. This prevents the
-    // first roll event racing ahead of clients while they leave the lobby.
+    // Brief scene transition delay. The host client then displays the small
+    // 3-2-1 first-roll countdown while attaching its prewarmed DiceBox.
     this.firstRollTimer = setTimeout(() => {
       this.firstRollTimer = null;
       this.triggerAutomaticRoll();
@@ -781,18 +781,25 @@ export class GreedyPigRoom extends Room {
     const diceCount = Number(this.state.settings.diceCount ?? 1);
     const diceSides = Number(this.state.settings.diceSides ?? 6) as 6 | 8 | 10 | 12 | 20;
 
+    const isFirstRoll = this.state.rollCountThisRound === 0;
+
     this.broadcast("host_roll_requested", {
       diceCount,
       diceSides,
+      round: this.state.currentRound,
+      isFirstRoll,
     });
 
+    // The first roll includes a brief client-side 3-2-1 while the preloaded
+    // renderer is attached. Give it extra headroom before using a server roll.
+    const fallbackDelayMs = isFirstRoll ? 20_000 : 12_000;
     this.rollFallbackTimer = setTimeout(() => {
       if (this.state.phase !== "rolling_animation") return;
 
       const die1 = Math.floor(Math.random() * diceSides) + 1;
       const die2 = diceCount === 2 ? Math.floor(Math.random() * diceSides) + 1 : null;
       this.applyHostResolvedRoll(die1, die2, diceCount, diceSides);
-    }, 12_000);
+    }, fallbackDelayMs);
   }
 
   private handleAnswerCountdownExpired() {
