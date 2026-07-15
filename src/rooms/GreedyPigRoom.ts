@@ -32,6 +32,12 @@ type HostRollResultPayload = {
   die2?: number;
   diceCount: number;
   diceSides: 6 | 8 | 10 | 12 | 20;
+  requestId?: number;
+};
+
+type HostFirstRollReadyPayload = {
+  round?: number;
+  diceReady?: boolean;
 };
 
 type KickPlayerPayload = {
@@ -53,6 +59,10 @@ export class GreedyPigRoom extends Room {
   private firstRollTimer: ReturnType<typeof setTimeout> | null = null;
   private rollFallbackTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly decisionWindowMs = 15_000;
+  private readonly firstRollCountdownMs = 3_000;
+  private readonly firstRollReadyTimeoutMs = 6_000;
+  private rollRequestSerial = 0;
+  private activeRollRequestId = 0;
 
   onCreate() {
     this.setState(new GreedyPigState());
@@ -163,6 +173,18 @@ export class GreedyPigRoom extends Room {
       this.startGame();
     });
 
+    this.onMessage(
+      "host_first_roll_ready",
+      (client, payload: HostFirstRollReadyPayload) => {
+        if (client.sessionId !== this.state.hostSessionId) return;
+        if (this.state.phase !== "preparing_first_roll") return;
+        if (Number(payload?.round ?? 0) !== Number(this.state.currentRound)) return;
+        if (this.state.rollCountThisRound !== 0) return;
+
+        this.beginFirstRollCountdown();
+      },
+    );
+
     this.onMessage("roll_die", (client) => {
       // Legacy/manual fallback only. The normal game flow now rolls automatically
       // after the server-controlled countdown reaches zero.
@@ -178,6 +200,9 @@ export class GreedyPigRoom extends Room {
         if (client.sessionId !== this.state.hostSessionId) return;
         if (this.state.phase !== "rolling_animation") return;
         if (!payload) return;
+
+        const requestId = Number(payload.requestId ?? this.activeRollRequestId);
+        if (requestId !== this.activeRollRequestId) return;
 
         const diceCount = Number(payload.diceCount ?? 1);
         const diceSides = Number(
@@ -282,12 +307,10 @@ export class GreedyPigRoom extends Room {
       this.state.rollCountThisRound = 0;
       this.resetRoundFlags();
 
-      // Move out of round_summary before launching the immediate first roll.
-      // Keeping this phase change preserves the Round 2 freeze fix.
-      this.state.phase = "awaiting_roll";
-
-      this.broadcast("round_started", { round: this.state.currentRound });
+      // Enter the preparation phase before broadcasting so every client can
+      // recover from a missed message by reading the authoritative room state.
       this.startImmediateFirstRoll();
+      this.broadcast("round_started", { round: this.state.currentRound });
     });
 
     this.onMessage("play_again", (client) => {
@@ -699,6 +722,7 @@ export class GreedyPigRoom extends Room {
     this.clearFirstRollTimer();
     this.clearRollFallbackTimer();
     this.clearCountdownState();
+    this.activeRollRequestId = 0;
 
     if (this.state.phase === "game_over") return;
 
@@ -707,17 +731,42 @@ export class GreedyPigRoom extends Room {
       return;
     }
 
-    this.state.phase = "awaiting_roll";
-    this.broadcast("first_roll_starting", {
-      round: this.state.currentRound,
-    });
+    // Wait until the host game scene has attached the prewarmed DiceBox. This
+    // prevents host_roll_requested from being sent during the Lobby -> Game
+    // scene transition, which previously lost the first physical roll.
+    this.state.phase = "preparing_first_roll";
 
-    // Brief scene transition delay. The host client then displays the small
-    // 3-2-1 first-roll countdown while attaching its prewarmed DiceBox.
     this.firstRollTimer = setTimeout(() => {
       this.firstRollTimer = null;
+      if (this.state.phase !== "preparing_first_roll") return;
+      this.beginFirstRollCountdown();
+    }, this.firstRollReadyTimeoutMs);
+  }
+
+  private beginFirstRollCountdown() {
+    if (this.state.phase !== "preparing_first_roll") return;
+
+    this.clearFirstRollTimer();
+    this.clearCountdownTimer();
+    this.clearRollFallbackTimer();
+
+    this.state.phase = "first_roll_countdown";
+    this.state.rollCountdownDurationMs = this.firstRollCountdownMs;
+    this.state.rollCountdownEndsAt = Date.now() + this.firstRollCountdownMs;
+
+    this.broadcast("first_roll_countdown_started", {
+      round: this.state.currentRound,
+      durationMs: this.firstRollCountdownMs,
+      endsAt: this.state.rollCountdownEndsAt,
+    });
+
+    this.firstRollTimer = setTimeout(() => {
+      this.firstRollTimer = null;
+      if (this.state.phase !== "first_roll_countdown") return;
+
+      this.state.phase = "awaiting_roll";
       this.triggerAutomaticRoll();
-    }, 850);
+    }, this.firstRollCountdownMs);
   }
 
   private startAnswerCountdown() {
@@ -782,19 +831,26 @@ export class GreedyPigRoom extends Room {
     const diceSides = Number(this.state.settings.diceSides ?? 6) as 6 | 8 | 10 | 12 | 20;
 
     const isFirstRoll = this.state.rollCountThisRound === 0;
+    const requestId = ++this.rollRequestSerial;
+    this.activeRollRequestId = requestId;
 
-    this.broadcast("host_roll_requested", {
+    const hostClient = this.findClientBySessionId(this.state.hostSessionId);
+    hostClient?.send("host_roll_requested", {
       diceCount,
       diceSides,
       round: this.state.currentRound,
       isFirstRoll,
+      requestId,
     });
 
-    // The first roll includes a brief client-side 3-2-1 while the preloaded
-    // renderer is attached. Give it extra headroom before using a server roll.
-    const fallbackDelayMs = isFirstRoll ? 20_000 : 12_000;
+    // Only the host needs the DiceBox request. Sending it directly avoids
+    // Colyseus "onMessage not registered" warnings on every student device.
+    // If the host renderer or browser fails, resolve the turn authoritatively
+    // so student inputs cannot remain frozen in rolling_animation.
+    const fallbackDelayMs = hostClient ? 11_000 : 1_000;
     this.rollFallbackTimer = setTimeout(() => {
       if (this.state.phase !== "rolling_animation") return;
+      if (this.activeRollRequestId !== requestId) return;
 
       const die1 = Math.floor(Math.random() * diceSides) + 1;
       const die2 = diceCount === 2 ? Math.floor(Math.random() * diceSides) + 1 : null;
@@ -839,8 +895,8 @@ export class GreedyPigRoom extends Room {
     this.state.currentRoll = 0;
     this.state.rollCountThisRound = 0;
     this.resetRoundFlags();
-    this.broadcast("round_started", { round: this.state.currentRound });
     this.startImmediateFirstRoll();
+    this.broadcast("round_started", { round: this.state.currentRound });
   }
 
   private applyHostResolvedRoll(
@@ -849,6 +905,8 @@ export class GreedyPigRoom extends Room {
     diceCount: number,
     diceSides: number,
   ) {
+    const resolvedRequestId = this.activeRollRequestId;
+    this.activeRollRequestId = 0;
     this.clearRollFallbackTimer();
     this.clearCountdownTimer();
     this.clearCountdownState();
@@ -891,20 +949,26 @@ export class GreedyPigRoom extends Room {
 
       this.state.phase = "awaiting_answers";
 
-      const payload = this.buildRollMessage(
-        die1,
-        die2,
-        diceCount,
-        diceSides,
-        false,
-      );
+      const payload = {
+        ...this.buildRollMessage(
+          die1,
+          die2,
+          diceCount,
+          diceSides,
+          false,
+        ),
+        requestId: resolvedRequestId,
+      };
 
       if (bustedAnyone) {
         this.broadcast("round_knockout", payload);
       } else {
         this.broadcast(
           "roll_result",
-          this.buildRollMessage(die1, die2, diceCount, diceSides, safeAnyone),
+          {
+            ...this.buildRollMessage(die1, die2, diceCount, diceSides, safeAnyone),
+            requestId: resolvedRequestId,
+          },
         );
       }
 
@@ -923,7 +987,10 @@ export class GreedyPigRoom extends Room {
     this.state.phase = "awaiting_answers";
     this.broadcast(
       "roll_result",
-      this.buildRollMessage(die1, die2, diceCount, diceSides, false),
+      {
+        ...this.buildRollMessage(die1, die2, diceCount, diceSides, false),
+        requestId: resolvedRequestId,
+      },
     );
 
     this.startAnswerCountdown();
@@ -1059,7 +1126,8 @@ export class GreedyPigRoom extends Room {
     this.state.currentRound = 1;
     this.state.currentRoll = 0;
     this.state.rollCountThisRound = 0;
-    this.state.phase = returnToLobby ? "lobby" : "awaiting_roll";
+    this.activeRollRequestId = 0;
+    this.state.phase = returnToLobby ? "lobby" : "preparing_first_roll";
 
     // Re-validate KO against current settings
     const diceCount = Number(this.state.settings.diceCount ?? 1);
